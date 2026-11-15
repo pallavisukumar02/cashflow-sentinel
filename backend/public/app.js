@@ -1,5 +1,5 @@
-const $ = (id) => document.getElementById(id);
 
+const $ = (id) => document.getElementById(id);
 const gateScreens = ["welcomeScreen", "signupScreen", "signinScreen", "featureScreen"];
 
 function showScreen(id) {
@@ -22,33 +22,81 @@ document.querySelectorAll("[data-back]").forEach(button =>
 $("toSigninBtn").addEventListener("click", () => showScreen("signinScreen"));
 $("toSignupBtn").addEventListener("click", () => showScreen("signupScreen"));
 
-// ==========================================
-// AMAZON COGNITO AUTHENTICATION
-// ==========================================
-
-function startCognitoLogin(event) {
+$("signupForm").addEventListener("submit", async event => {
   event.preventDefault();
-  window.location.assign("/auth/login");
-}
+  const button = event.currentTarget.querySelector('button[type="submit"]');
+  button.disabled = true;
+  const payload = Object.fromEntries(new FormData(event.currentTarget).entries());
 
-$("signupForm").addEventListener("submit", startCognitoLogin);
-$("signinForm").addEventListener("submit", startCognitoLogin);
-
-async function signOutCognito() {
   try {
-    const result = await request("/auth/logout", { method: "POST" });
-    window.location.assign(result.logoutUrl || "/");
-  } catch (error) {
-    authMessage("signinMessage", error.message, "error");
+    const data = await request("/api/signup", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+
+    $("signinForm").elements.email.value = payload.email;
+    $("signinForm").elements.password.value = "";
+    authMessage("signinMessage", data.message || "Account created. Please sign in.", "success");
+    showScreen("signinScreen");
+  } catch (err) {
+    authMessage("signupMessage", err.message, "error");
+  } finally {
+    button.disabled = false;
   }
+});
+
+$("signinForm").addEventListener("submit", async event => {
+  event.preventDefault();
+  const button = event.currentTarget.querySelector('button[type="submit"]');
+  button.disabled = true;
+  const payload = Object.fromEntries(new FormData(event.currentTarget).entries());
+
+  try {
+    const data = await request("/api/signin", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
+
+    sessionStorage.setItem("cashflowUser", JSON.stringify(data.user));
+    sessionStorage.setItem("cashflowToken", data.token);
+
+    $("signedInName").textContent = data.user.name;
+
+    const businessInput = $("analysisForm").elements.businessId;
+    businessInput.value = data.user.email.replace(/[^a-z0-9-]/g, "-");
+    $("paymentBusinessId").value = businessInput.value;
+
+    $("avatar").textContent = data.user.name
+      .split(/\s+/)
+      .map(part => part[0])
+      .join("")
+      .slice(0, 2)
+      .toUpperCase();
+
+    showScreen("dashboard");
+    loadPayments();
+  } catch (err) {
+    authMessage("signinMessage", err.message, "error");
+  } finally {
+    button.disabled = false;
+  }
+});
+
+function signOut() {
+  sessionStorage.removeItem("cashflowUser");
+  sessionStorage.removeItem("cashflowToken");
+  showScreen("welcomeScreen");
 }
 
-$("signoutBtn").addEventListener("click", signOutCognito);
+$("signoutBtn").addEventListener("click", signOut);
 
 document.querySelectorAll("[data-feature]").forEach(button =>
   button.addEventListener("click", () => {
     showScreen("dashboard");
     const feature = button.dataset.feature;
+
     const target =
       feature === "transactions" ? $("transactionsPanel") :
       feature === "history" ? document.querySelector(".history-panel") :
@@ -97,21 +145,13 @@ function formatDate(value) {
 }
 
 async function request(url, options = {}) {
-  const response = await fetch(url, {
-    credentials: "same-origin",
-    ...options
-  });
-
+  const response = await fetch(url, options);
   const data = await response.json().catch(() => ({}));
-
-  if (response.status === 401 && url !== "/auth/me") {
-    window.location.assign("/auth/login");
-    throw new Error("Please sign in again.");
-  }
 
   if (!response.ok) {
     throw new Error(
-      data.error || data.message ||
+      data.error ||
+      data.message ||
       `Request failed (${response.status})${data.detail ? ": " + data.detail : ""}`
     );
   }
@@ -123,7 +163,7 @@ async function checkHealth() {
   try {
     const data = await request("/health");
     $("apiStatus").textContent =
-      data.status === "ok" ? "Connected · CashFlow Sentinel" : "API response received";
+      data.status === "ok" ? "Connected · localhost:3000" : "API response received";
     $("apiStatus").style.color = "#80f4cf";
   } catch {
     $("apiStatus").textContent = "API unavailable · start server";
@@ -154,15 +194,22 @@ function renderRiskChart(data) {
     risk >= 50 ? "#d84e5d" : risk > 0 ? "#bd8426" : "#168e68";
 
   const bar = (label, amount, cls) =>
-    `<div class="chart-row"><span>${label}</span><div class="chart-track"><div class="chart-bar ${cls}" style="width:${Math.max(amount > 0 ? 2 : 0, amount / scale * 100)}%"></div></div><b class="chart-value">${escapeHtml(money(amount, data.currency || "INR"))}</b></div>`;
+    `<div class="chart-row">
+      <span>${label}</span>
+      <div class="chart-track">
+        <div class="chart-bar ${cls}" style="width:${Math.max(amount > 0 ? 2 : 0, amount / scale * 100)}%"></div>
+      </div>
+      <b class="chart-value">${escapeHtml(money(amount, data.currency || "INR"))}</b>
+    </div>`;
 
   $("riskChart").innerHTML =
     bar("Funds available", available, "available") +
     bar("Payments due", due, "due");
 
-  $("riskChartSummary").textContent = shortfall > 0
-    ? `Potential shortfall of ${money(shortfall, data.currency || "INR")}. Due payments exceed projected available funds. This is a planning signal, not a prediction of actual default.`
-    : `Projected available funds cover the listed payments by ${money(available - due, data.currency || "INR")}. Keep checking payment dates and receivables.`;
+  $("riskChartSummary").textContent =
+    shortfall > 0
+      ? `Potential shortfall of ${money(shortfall, data.currency || "INR")}. Due payments exceed projected available funds. This is a planning signal, not a prediction of actual default.`
+      : `Projected available funds cover the listed payments by ${money(available - due, data.currency || "INR")}. Keep checking payment dates and receivables.`;
 }
 
 function renderAnalysis(data) {
@@ -177,9 +224,11 @@ function renderAnalysis(data) {
   $("metricProjected").textContent = money(data.projectedCash, sym);
   $("metricProjectedNote").textContent =
     data.projectedCash < 0 ? "Projected shortfall" : "Projected end-of-period balance";
+
   $("heroProjected").textContent = money(data.projectedCash, sym);
   $("heroRisk").textContent = status;
   $("metricStatus").textContent = status;
+
   $("metricStatus").style.color =
     status === "CRITICAL" ? "#d84e5d" :
     status === "WARNING" ? "#bd8426" : "#168e68";
@@ -191,10 +240,15 @@ function renderAnalysis(data) {
 
   $("metricTime").textContent = formatDate(data.createdAt);
   $("metricId").textContent = `ID: ${(data.analysisId || "—").slice(0, 12)}`;
+
   $("resultProjected").textContent = money(data.projectedCash, sym);
 
   $("resultFormula").textContent =
-    `${money(data.currentCash, sym)} + ${money(data.expectedIncome, sym)} + ${money(data.receivables, sym)} − ${money(data.expectedExpenses, sym)} − ${money(data.upcomingObligations, sym)}`;
+    `${money(data.currentCash, sym)} + ` +
+    `${money(data.expectedIncome, sym)} + ` +
+    `${money(data.receivables, sym)} − ` +
+    `${money(data.expectedExpenses, sym)} − ` +
+    `${money(data.upcomingObligations, sym)}`;
 
   const statusEl = $("resultStatus");
   statusEl.className = `result-status ${status.toLowerCase()}`;
@@ -234,17 +288,34 @@ function renderAnalysis(data) {
   }
 
   $("resultAnalysisId").textContent = data.analysisId || "Not generated";
-  $("storageNote").textContent =
-    data.storageNote || (data.savedToDynamoDB ? "Saved to DynamoDB." : "Calculated by backend.");
-  $("storageNote").style.color = data.savedToDynamoDB ? "#168e68" : "#8995a7";
 
-  showMessage(
-    "formMessage",
-    data.savedToDynamoDB
-      ? "Analysis complete and saved to DynamoDB."
-      : "Analysis complete. DynamoDB save was not confirmed; check AWS credentials and IAM permissions.",
-    data.savedToDynamoDB ? "success" : ""
-  );
+  $("storageNote").textContent =
+    data.storageNote ||
+    (data.savedToDynamoDB ? "Saved to DynamoDB." : "Calculated by backend.");
+
+  $("storageNote").style.color =
+    data.savedToDynamoDB ? "#168e68" : "#8995a7";
+
+  const storageMessage = data.savedToDynamoDB
+    ? "Analysis complete and saved to DynamoDB."
+    : "Analysis complete. DynamoDB save was not confirmed; check AWS credentials and IAM permissions.";
+
+  const emailMessage = data.emailNotification
+    ? (
+        data.emailNotification.sent
+          ? ` Financial report emailed to ${data.emailNotification.email || "your registered email"}.`
+          : ` Email was not sent: ${data.emailNotification.message || data.emailNotification.reason || "check Gmail settings in the backend."}`
+      )
+    : "";
+
+  const messageKind =
+    data.emailNotification && !data.emailNotification.sent
+      ? "error"
+      : data.emailNotification && data.emailNotification.sent
+        ? "success"
+        : (data.savedToDynamoDB ? "success" : "");
+
+  showMessage("formMessage", storageMessage + emailMessage, messageKind);
 }
 
 function escapeHtml(value) {
@@ -257,6 +328,7 @@ function escapeHtml(value) {
   }[c]));
 }
 
+// FINANCIAL HEALTH ANALYSIS + AUTOMATIC EMAIL
 $("analysisForm").addEventListener("submit", async event => {
   event.preventDefault();
 
@@ -281,12 +353,16 @@ $("analysisForm").addEventListener("submit", async event => {
   try {
     const data = await request("/api/analyze", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${sessionStorage.getItem("cashflowToken") || ""}`
+      },
       body: JSON.stringify(payload)
     });
 
     renderAnalysis(data);
     await loadHistory();
+
   } catch (err) {
     showMessage("formMessage", err.message, "error");
   } finally {
@@ -297,7 +373,9 @@ $("analysisForm").addEventListener("submit", async event => {
 
 $("heroAnalyze").addEventListener("click", () => {
   $("analysisPanel").scrollIntoView({ behavior: "smooth", block: "start" });
-  $("analysisForm").querySelector('input[name="currentCash"]').focus({ preventScroll: true });
+  $("analysisForm")
+    .querySelector('input[name="currentCash"]')
+    .focus({ preventScroll: true });
 });
 
 $("copyId").addEventListener("click", async () => {
@@ -322,7 +400,11 @@ $("csvForm").addEventListener("submit", async event => {
   const file = $("csvFile").files[0];
 
   if (!file) {
-    return showMessage("csvMessage", "Choose a CSV file first, or use “Analyse sample from S3”.", "error");
+    return showMessage(
+      "csvMessage",
+      "Choose a CSV file first, or use “Analyse sample from S3”.",
+      "error"
+    );
   }
 
   await runCsv(new FormData(event.currentTarget));
@@ -343,7 +425,10 @@ async function runCsv(formData) {
   }
 
   try {
-    showMessage("csvMessage", hasFile ? "Uploading and analysing CSV…" : "Reading sample CSV from S3…");
+    showMessage(
+      "csvMessage",
+      hasFile ? "Uploading and analysing CSV…" : "Reading sample CSV from S3…"
+    );
 
     const data = await request("/api/analyze-csv", {
       method: "POST",
@@ -357,16 +442,29 @@ async function runCsv(formData) {
     );
 
     $("csvResult").hidden = false;
+
     $("csvResult").innerHTML =
-      `<div class="csv-stats"><div><small>ROWS READ</small><b>${data.rowsRead}</b></div><div><small>TOTAL INCOME</small><b>${money(data.totals.income)}</b></div><div><small>TOTAL EXPENSES</small><b>${money(data.totals.expenses)}</b></div></div><p><b>Net movement:</b> ${money(data.totals.net)}. ${escapeHtml(data.note || "")}</p><p><b>Detected columns:</b> ${escapeHtml((data.detectedColumns || []).join(", "))}</p>`;
+      `<div class="csv-stats">
+        <div><small>ROWS READ</small><b>${data.rowsRead}</b></div>
+        <div><small>TOTAL INCOME</small><b>${money(data.totals.income)}</b></div>
+        <div><small>TOTAL EXPENSES</small><b>${money(data.totals.expenses)}</b></div>
+      </div>
+      <p><b>Net movement:</b> ${money(data.totals.net)}. ${escapeHtml(data.note || "")}</p>
+      <p><b>Detected columns:</b> ${escapeHtml((data.detectedColumns || []).join(", "))}</p>`;
+
   } catch (err) {
     showMessage("csvMessage", err.message, "error");
   }
 }
 
 async function loadHistory() {
+  const businessId =
+    $("analysisForm").elements.businessId.value || "demo-business-001";
+
   try {
-    const data = await request("/api/history");
+    const data = await request(
+      `/api/history?businessId=${encodeURIComponent(businessId)}`
+    );
 
     if (!data.items?.length) {
       $("historyList").innerHTML =
@@ -375,8 +473,15 @@ async function loadHistory() {
     }
 
     $("historyList").innerHTML = data.items.slice(0, 5).map(item =>
-      `<div class="history-item"><div><b>${escapeHtml(item.financialStatus || "Analysis")}</b><small>${escapeHtml(formatDate(item.createdAt))} · ${escapeHtml(String(item.analysisId || "").slice(0, 10))}</small></div><strong>${escapeHtml(money(item.projectedCash, item.currency))}</strong></div>`
+      `<div class="history-item">
+        <div>
+          <b>${escapeHtml(item.financialStatus || "Analysis")}</b>
+          <small>${escapeHtml(formatDate(item.createdAt))} · ${escapeHtml(String(item.analysisId || "").slice(0, 10))}</small>
+        </div>
+        <strong>${escapeHtml(money(item.projectedCash, item.currency))}</strong>
+      </div>`
     ).join("");
+
   } catch (err) {
     $("historyList").innerHTML =
       `<div class="empty-state">${escapeHtml(err.message)}<br/>This section needs DynamoDB read permission (Scan).</div>`;
@@ -386,13 +491,14 @@ async function loadHistory() {
 async function loadConfig() {
   try {
     const c = await request("/api/config");
-    $("awsConfig").textContent = `${c.region} · S3: ${c.bucket} · DynamoDB: ${c.table}`;
+    $("awsConfig").textContent =
+      `${c.region} · S3: ${c.bucket} · DynamoDB: ${c.table}`;
   } catch {
     $("awsConfig").textContent = "Could not load AWS configuration";
   }
 }
 
-document.querySelectorAll(".nav-item").forEach(button => {
+document.querySelectorAll(".nav-item").forEach(button =>
   button.addEventListener("click", () => {
     document.querySelectorAll(".nav-item").forEach(b => b.classList.remove("active"));
     button.classList.add("active");
@@ -411,22 +517,21 @@ document.querySelectorAll(".nav-item").forEach(button => {
         })[button.dataset.tab] || document.querySelector(".topbar");
 
     target.scrollIntoView({ behavior: "smooth", block: "start" });
-  });
-});
+  })
+);
 
 $("refreshHistory").addEventListener("click", loadHistory);
 
-// ==========================================
 // PAYMENT TRACKER
-// ==========================================
-
 let paymentItems = [];
 let soundEnabled = true;
 
 const paymentMoney = (value, currency = "INR") => money(value, currency);
 
 function paymentBusinessId() {
-  return $("analysisForm").elements.businessId.value;
+  return $("paymentBusinessId").value.trim() ||
+    $("analysisForm").elements.businessId.value ||
+    "demo-business-001";
 }
 
 function paymentMessage(message, kind = "") {
@@ -450,7 +555,16 @@ function renderPaymentChart(items) {
     const due = Number(p.amountDue ?? (total - paid));
     const id = escapeHtml(p.invoiceId || p.paymentId || "Invoice");
 
-    return `<div class="payment-chart-row"><div class="payment-chart-label"><b>${id}</b><small>${escapeHtml(p.status || "UNPAID")}</small></div><div class="stacked-track"><i class="paid-segment" style="width:${Math.min(100, paid / max * 100)}%"></i><i class="due-segment" style="width:${Math.min(100, due / max * 100)}%"></i></div><strong>${escapeHtml(paymentMoney(total, p.currency))}</strong></div>`;
+    return `<div class="payment-chart-row">
+      <div class="payment-chart-label">
+        <b>${id}</b><small>${escapeHtml(p.status || "UNPAID")}</small>
+      </div>
+      <div class="stacked-track">
+        <i class="paid-segment" style="width:${Math.min(100, paid / max * 100)}%"></i>
+        <i class="due-segment" style="width:${Math.min(100, due / max * 100)}%"></i>
+      </div>
+      <strong>${escapeHtml(paymentMoney(total, p.currency))}</strong>
+    </div>`;
   }).join("");
 }
 
@@ -482,20 +596,30 @@ function renderPayments(items) {
   $("paymentRows").innerHTML = paymentItems.length
     ? paymentItems.map(p => {
         const pid = String(p.paymentId || "");
-        const dueAmt = Number(p.amountDue ?? (Number(p.totalAmount || 0) - Number(p.amountPaid || 0)));
+        const dueAmt = Number(
+          p.amountDue ?? (Number(p.totalAmount || 0) - Number(p.amountPaid || 0))
+        );
 
-        return `<tr><td><b>${escapeHtml(p.invoiceId || pid)}</b><br>${escapeHtml(p.description || "")}<br><span class="muted">${escapeHtml(p.businessName || "")} · ${escapeHtml(p.recipientEmail || "")}</span></td><td>${escapeHtml(p.dueDate || "—")}</td><td>${escapeHtml(paymentMoney(p.totalAmount, p.currency))}</td><td>${escapeHtml(paymentMoney(p.amountPaid, p.currency))}</td><td class="money">${escapeHtml(paymentMoney(dueAmt, p.currency))}</td><td><span class="pill ${String(p.status).toLowerCase()}">${escapeHtml(p.status || "UNPAID")}</span></td><td><button type="button" class="small secondary select-payment" data-payment-id="${escapeHtml(pid)}">Select</button></td></tr>`;
+        return `<tr>
+          <td>
+            <b>${escapeHtml(p.invoiceId || pid)}</b><br>
+            ${escapeHtml(p.description || "")}<br>
+            <span class="muted">${escapeHtml(p.businessName || "")} · ${escapeHtml(p.recipientEmail || "")}</span>
+          </td>
+          <td>${escapeHtml(p.dueDate || "—")}</td>
+          <td>${escapeHtml(paymentMoney(p.totalAmount, p.currency))}</td>
+          <td>${escapeHtml(paymentMoney(p.amountPaid, p.currency))}</td>
+          <td class="money">${escapeHtml(paymentMoney(dueAmt, p.currency))}</td>
+          <td><span class="pill ${String(p.status).toLowerCase()}">${escapeHtml(p.status || "UNPAID")}</span></td>
+          <td><button type="button" class="small secondary select-payment" data-payment-id="${escapeHtml(pid)}">Select</button></td>
+        </tr>`;
       }).join("")
-    : '<tr><td colspan="7">No invoices found for this account. Add an invoice above or import the combined CSV.</td></tr>';
+    : '<tr><td colspan="7">No invoices found for this business ID. Add an invoice above or import the combined CSV.</td></tr>';
 
-  document.querySelectorAll(".select-payment").forEach(button =>
-    button.addEventListener("click", () => {
-      $("selectedPaymentId").value = button.dataset.paymentId;
-
-      const item = paymentItems.find(
-        p => String(p.paymentId) === button.dataset.paymentId
-      );
-
+  document.querySelectorAll(".select-payment").forEach(b =>
+    b.addEventListener("click", () => {
+      $("selectedPaymentId").value = b.dataset.paymentId;
+      const item = paymentItems.find(p => String(p.paymentId) === b.dataset.paymentId);
       if (item) {
         $("recordPaymentAmount").max = Number(item.amountDue || 0);
       }
@@ -507,51 +631,55 @@ function renderPayments(items) {
 
 async function loadPayments() {
   try {
-    const data = await request("/api/payments");
-    renderPayments(data.items || []);
+    const d = await request(
+      `/api/payments?businessId=${encodeURIComponent(paymentBusinessId())}`
+    );
 
+    renderPayments(d.items || []);
     showMessage(
       "paymentMessage",
-      `Loaded ${data.count || 0} payment record(s) from CashFlowPayments.`,
+      `Loaded ${d.count || 0} payment record(s) from CashFlowPayments.`,
       "success"
     );
-  } catch (error) {
+  } catch (e) {
     renderPayments([]);
-    paymentMessage(error.message);
+    paymentMessage(
+      `${e.message} Check AWS credentials, CashFlowPayments table keys and IAM Scan permission.`
+    );
   }
 }
 
-$("paymentForm").addEventListener("submit", async event => {
-  event.preventDefault();
+$("paymentForm").addEventListener("submit", async e => {
+  e.preventDefault();
 
-  const payload = Object.fromEntries(new FormData(event.currentTarget).entries());
+  const payload = Object.fromEntries(new FormData(e.currentTarget).entries());
 
-  delete payload.businessId;
-
+  payload.businessId = payload.businessId.trim();
   payload.totalAmount = Number(payload.totalAmount);
   payload.amountPaid = Number(payload.amountPaid);
+  payload.reminderStartDays = Number(payload.reminderStartDays);
 
   if (!payload.paymentId) {
     payload.paymentId = `PAY-${Date.now().toString().slice(-8)}`;
   }
 
   try {
-    const data = await request("/api/payments", {
+    const d = await request("/api/payments", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload)
     });
 
-    $("selectedPaymentId").value = data.item.paymentId;
+    $("selectedPaymentId").value = d.item.paymentId;
 
     paymentMessage(
-      `Saved ${data.item.invoiceId} to CashFlowPayments. Status: ${data.item.status}.`,
+      `Saved ${d.item.invoiceId} to CashFlowPayments. Status: ${d.item.status}.`,
       "success"
     );
 
     await loadPayments();
-  } catch (error) {
-    paymentMessage(error.message);
+  } catch (err) {
+    paymentMessage(err.message);
   }
 });
 
@@ -570,12 +698,13 @@ $("recordPaymentBtn").addEventListener("click", async () => {
   }
 
   try {
-    const data = await request(
+    const d = await request(
       `/api/payments/${encodeURIComponent(id)}/record-payment`,
       {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
+          businessId: paymentBusinessId(),
           amount,
           note: $("recordPaymentNote").value || "Payment recorded in dashboard"
         })
@@ -583,13 +712,13 @@ $("recordPaymentBtn").addEventListener("click", async () => {
     );
 
     paymentMessage(
-      `Payment recorded. Paid ${paymentMoney(data.item.amountPaid, data.item.currency)}; outstanding ${paymentMoney(data.item.amountDue, data.item.currency)}.`,
+      `Payment recorded. Paid ${paymentMoney(d.item.amountPaid, d.item.currency)}; outstanding ${paymentMoney(d.item.amountDue, d.item.currency)}.`,
       "success"
     );
 
     await loadPayments();
-  } catch (error) {
-    paymentMessage(error.message);
+  } catch (e) {
+    paymentMessage(e.message);
   }
 });
 
@@ -599,22 +728,24 @@ $("testReminderBtn").addEventListener("click", async () => {
   if (!id) return paymentMessage("Select an invoice first.");
 
   try {
-    const data = await request(
+    const d = await request(
       `/api/payments/${encodeURIComponent(id)}/test-reminder`,
-      { method: "POST" }
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ businessId: paymentBusinessId() })
+      }
     );
 
-    paymentMessage(data.message, "success");
-  } catch (error) {
-    paymentMessage(error.message);
+    paymentMessage(d.message, "success");
+  } catch (e) {
+    paymentMessage(e.message);
   }
 });
 
 function parseCsvText(text) {
   const rows = [];
-  let row = [];
-  let field = "";
-  let quoted = false;
+  let row = [], field = "", quoted = false;
 
   for (let i = 0; i < text.length; i++) {
     const c = text[i];
@@ -624,11 +755,11 @@ function parseCsvText(text) {
       i++;
     } else if (c === '"') {
       quoted = !quoted;
-    } else if (c === "," && !quoted) {
+    } else if (c === ',' && !quoted) {
       row.push(field);
       field = "";
-    } else if ((c === "\n" || c === "\r") && !quoted) {
-      if (c === "\r" && text[i + 1] === "\n") i++;
+    } else if ((c === '\n' || c === '\r') && !quoted) {
+      if (c === '\r' && text[i + 1] === '\n') i++;
       row.push(field);
       if (row.some(v => v !== "")) rows.push(row);
       row = [];
@@ -672,7 +803,7 @@ $("importPaymentsBtn").addEventListener("click", async () => {
     }
 
     let ok = 0;
-    const failed = [];
+    let failed = [];
 
     for (const r of records) {
       const total = Number(r.totalAmount ?? r.total_amount_inr);
@@ -682,6 +813,7 @@ $("importPaymentsBtn").addEventListener("click", async () => {
       const email = String(r.recipientEmail || r.recipient_email || "").trim();
 
       const payload = {
+        businessId: r.businessId || r.business_id || paymentBusinessId(),
         paymentId: id,
         businessName: r.businessName || r.business_name || "Business",
         description: r.description || r.invoiceId || r.invoice_id || id || "Invoice",
@@ -690,7 +822,9 @@ $("importPaymentsBtn").addEventListener("click", async () => {
         totalAmount: total,
         amountPaid: paid,
         recipientEmail: email,
-        currency: r.currency || "INR"
+        currency: r.currency || "INR",
+        reminderStartDays: Number(r.reminderStartDays || r.reminder_start_days || 7),
+        overdueReminder: r.overdueReminder || r.overdue_reminder || "weekly"
       };
 
       if (
@@ -717,10 +851,9 @@ $("importPaymentsBtn").addEventListener("click", async () => {
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify(payload)
         });
-
         ok++;
-      } catch (error) {
-        failed.push(`${id}: ${error.message}`);
+      } catch (err) {
+        failed.push(`${id}: ${err.message}`);
       }
     }
 
@@ -731,15 +864,12 @@ $("importPaymentsBtn").addEventListener("click", async () => {
     );
 
     await loadPayments();
-  } catch (error) {
-    showMessage("paymentImportMessage", error.message, "error");
+  } catch (e) {
+    showMessage("paymentImportMessage", e.message, "error");
   }
 });
 
-// ==========================================
-// LANGUAGE SUPPORT
-// ==========================================
-
+// LANGUAGE SETTINGS
 const translations = {
   en: {
     overview: "Overview",
@@ -806,11 +936,76 @@ function applyLanguage(lang) {
   if (h) h.innerHTML = `${t.greeting} <em>cash clarity.</em>`;
 
   $("heroAnalyze").innerHTML = `${t.run} <span>↗</span>`;
+
+  const labels = {
+    en: {
+      ".topbar .eyebrow": "FINANCIAL CONTROL CENTER / 01",
+      ".analysis-panel h3": "Analyse your cash flow",
+      ".result-panel h3": "Analysis result",
+      ".csv-panel h3": "Transaction CSV",
+      ".history-panel h3": "Recent analyses",
+      "#paymentsPanel h3": "Payments & automated reminders",
+      "#paymentsPanel .scheduler-banner b": "Daily reminder scheduler",
+      "#paymentsPanel .payments-table-panel h4": "Invoices and payment status",
+      "#paymentsPanel .payment-chart-panel h4": "Paid vs outstanding by invoice"
+    },
+    hi: {
+      ".topbar .eyebrow": "वित्तीय नियंत्रण केंद्र / 01",
+      ".analysis-panel h3": "नकदी प्रवाह का विश्लेषण",
+      ".result-panel h3": "विश्लेषण परिणाम",
+      ".csv-panel h3": "लेन-देन CSV",
+      ".history-panel h3": "हाल के विश्लेषण",
+      "#paymentsPanel h3": "भुगतान और स्वचालित रिमाइंडर",
+      "#paymentsPanel .scheduler-banner b": "दैनिक रिमाइंडर शेड्यूलर",
+      "#paymentsPanel .payments-table-panel h4": "इनवॉइस और भुगतान स्थिति",
+      "#paymentsPanel .payment-chart-panel h4": "भुगतान बनाम बकाया"
+    },
+    kn: {
+      ".topbar .eyebrow": "ಹಣಕಾಸು ನಿಯಂತ್ರಣ ಕೇಂದ್ರ / 01",
+      ".analysis-panel h3": "ನಗದು ಹರಿವು ವಿಶ್ಲೇಷಿಸಿ",
+      ".result-panel h3": "ವಿಶ್ಲೇಷಣೆ ಫಲಿತಾಂಶ",
+      ".csv-panel h3": "ವಹಿವಾಟು CSV",
+      ".history-panel h3": "ಇತ್ತೀಚಿನ ವಿಶ್ಲೇಷಣೆಗಳು",
+      "#paymentsPanel h3": "ಪಾವತಿಗಳು ಮತ್ತು ಸ್ವಯಂಚಾಲಿತ ಜ್ಞಾಪನೆಗಳು",
+      "#paymentsPanel .scheduler-banner b": "ದೈನಂದಿನ ಜ್ಞಾಪನೆ ವೇಳಾಪಟ್ಟಿ",
+      "#paymentsPanel .payments-table-panel h4": "ಇನ್‌ವಾಯ್ಸ್ ಮತ್ತು ಪಾವತಿ ಸ್ಥಿತಿ",
+      "#paymentsPanel .payment-chart-panel h4": "ಪಾವತಿಸಿದ ಮೊತ್ತ ಮತ್ತು ಬಾಕಿ"
+    },
+    ta: {
+      ".topbar .eyebrow": "நிதி கட்டுப்பாட்டு மையம் / 01",
+      ".analysis-panel h3": "பணப்புழக்கத்தை பகுப்பாய்வு செய்",
+      ".result-panel h3": "பகுப்பாய்வு முடிவு",
+      ".csv-panel h3": "பரிவர்த்தனை CSV",
+      ".history-panel h3": "சமீபத்திய பகுப்பாய்வுகள்",
+      "#paymentsPanel h3": "கட்டணங்கள் மற்றும் தானியங்கி நினைவூட்டல்கள்",
+      "#paymentsPanel .scheduler-banner b": "தினசரி நினைவூட்டல் அட்டவணை",
+      "#paymentsPanel .payments-table-panel h4": "விலைப்பட்டியல் மற்றும் கட்டண நிலை",
+      "#paymentsPanel .payment-chart-panel h4": "செலுத்தியது மற்றும் நிலுவை"
+    },
+    te: {
+      ".topbar .eyebrow": "ఆర్థిక నియంత్రణ కేంద్రం / 01",
+      ".analysis-panel h3": "నగదు ప్రవాహాన్ని విశ్లేషించండి",
+      ".result-panel h3": "విశ్లేషణ ఫలితం",
+      ".csv-panel h3": "లావాదేవీ CSV",
+      ".history-panel h3": "ఇటీవలి విశ్లేషణలు",
+      "#paymentsPanel h3": "చెల్లింపులు మరియు ఆటోమేటిక్ రిమైండర్లు",
+      "#paymentsPanel .scheduler-banner b": "రోజువారీ రిమైండర్ షెడ్యూలర్",
+      "#paymentsPanel .payments-table-panel h4": "ఇన్వాయిస్ మరియు చెల్లింపు స్థితి",
+      "#paymentsPanel .payment-chart-panel h4": "చెల్లించిన మొత్తం మరియు బకాయి"
+    }
+  };
+
+  Object.entries(labels[lang] || labels.en).forEach(([selector, value]) => {
+    const el = document.querySelector(selector);
+    if (el) el.textContent = value;
+  });
+
   document.documentElement.lang = lang;
 }
 
 $("languageSelect").addEventListener("change", e => applyLanguage(e.target.value));
 
+// SOUND ALERTS
 function playAlertSound() {
   try {
     const Ctx = window.AudioContext || window.webkitAudioContext;
@@ -833,73 +1028,31 @@ function playAlertSound() {
     osc.start();
     osc.stop(ctx.currentTime + 0.4);
     osc.onended = () => ctx.close();
-  } catch (error) {
-    console.warn("Browser sound unavailable", error);
+
+  } catch (e) {
+    console.warn("Browser sound unavailable", e);
   }
 }
 
 $("soundToggle").addEventListener("click", () => {
   soundEnabled = !soundEnabled;
+
   $("soundToggle").textContent =
     soundEnabled ? "🔔 Sound alerts: On" : "🔕 Sound alerts: Off";
+
   $("soundToggle").setAttribute("aria-pressed", String(soundEnabled));
 
   if (soundEnabled) playAlertSound();
 });
 
-// ==========================================
-// COGNITO SESSION RESTORATION
-// ==========================================
-
-$("dashboardSignout").addEventListener("click", signOutCognito);
-
-async function restoreCognitoSession() {
-  try {
-    const response = await fetch("/auth/me", {
-      credentials: "same-origin"
-    });
-
-    if (!response.ok) {
-      showScreen("welcomeScreen");
-      return;
-    }
-
-    const data = await response.json();
-    const user = data.user;
-
-    $("signedInName").textContent = user.name || user.email;
-
-    $("avatar").textContent = (user.name || user.email)
-      .split(/\s+/)
-      .map(part => part[0])
-      .join("")
-      .slice(0, 2)
-      .toUpperCase();
-
-    $("analysisForm").elements.businessId.value = user.id;
-    $("paymentBusinessId").value = user.id;
-
-    showScreen("dashboard");
-
-    await Promise.all([
-      loadConfig(),
-      loadHistory(),
-      loadPayments()
-    ]);
-
-  } catch (error) {
-    console.error("Cognito session restoration failed:", error);
-    showScreen("welcomeScreen");
-  }
-}
+$("dashboardSignout").addEventListener("click", signOut);
+$("paymentBusinessId").addEventListener("change", loadPayments);
 
 checkHealth();
-restoreCognitoSession();
+loadConfig();
+loadHistory();
 
-// ==========================================
 // INTEGRATED BEDROCK-POWERED AI COPILOT
-// ==========================================
-
 const copilotForm = $("copilotForm");
 
 function addCopilotMessage(text, role = "bot", error = false) {
@@ -936,11 +1089,10 @@ async function askCopilot(question) {
           (sum, p) => sum + Number(p.amountPaid || 0), 0
         ),
         totalDue: paymentItems.reduce(
-          (sum, p) =>
-            sum + Number(
-              p.amountDue ??
-              Math.max(0, Number(p.totalAmount || 0) - Number(p.amountPaid || 0))
-            ), 0
+          (sum, p) => sum + Number(
+            p.amountDue ??
+            Math.max(0, Number(p.totalAmount || 0) - Number(p.amountPaid || 0))
+          ), 0
         )
       };
     }
@@ -953,8 +1105,8 @@ async function askCopilot(question) {
 
     pending.textContent = result.answer || "No answer returned.";
 
-  } catch (error) {
-    pending.textContent = error.message;
+  } catch (err) {
+    pending.textContent = err.message;
     pending.classList.add("error");
   } finally {
     send.disabled = false;
@@ -975,10 +1127,10 @@ copilotForm.addEventListener("submit", async event => {
   await askCopilot(question);
 });
 
-document.querySelectorAll(".copilot-prompt").forEach(button => {
+document.querySelectorAll(".copilot-prompt").forEach(button =>
   button.addEventListener("click", () => {
     const question = button.dataset.prompt;
     addCopilotMessage(question, "user");
     askCopilot(question);
-  });
-});
+  })
+);
